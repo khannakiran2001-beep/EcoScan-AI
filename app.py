@@ -95,62 +95,81 @@ h1, h2, h3 { font-family: 'DM Serif Display', serif; }
 """, unsafe_allow_html=True)
 
 # ── HF Inference helper ───────────────────────────────────────────────────────
-HF_API_URL = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.2"
+# Using the newer /v1/chat/completions endpoint (OpenAI-compatible)
+HF_API_URL = "https://api-inference.huggingface.co/v1/chat/completions"
+HF_MODEL   = "mistralai/Mistral-7B-Instruct-v0.3"
 
-def call_hf(prompt: str, hf_token: str) -> str:
-    headers = {"Authorization": f"Bearer {hf_token}"}
-    payload = {
-        "inputs": prompt,
-        "parameters": {"max_new_tokens": 700, "temperature": 0.4, "return_full_text": False},
+def call_hf(system_msg: str, user_msg: str, hf_token: str) -> str:
+    """Call HF Inference API using the OpenAI-compatible chat endpoint."""
+    headers = {
+        "Authorization": f"Bearer {hf_token}",
+        "Content-Type": "application/json",
     }
-    resp = requests.post(HF_API_URL, headers=headers, json=payload, timeout=60)
+    payload = {
+        "model": HF_MODEL,
+        "messages": [
+            {"role": "system", "content": system_msg},
+            {"role": "user",   "content": user_msg},
+        ],
+        "max_tokens": 1200,
+        "temperature": 0.2,
+    }
+    resp = requests.post(HF_API_URL, headers=headers, json=payload, timeout=90)
     if resp.status_code != 200:
-        return f"[API Error {resp.status_code}]: {resp.text[:300]}"
+        raise RuntimeError(f"HF API error {resp.status_code}: {resp.text[:400]}")
     data = resp.json()
-    if isinstance(data, list) and data:
-        return data[0].get("generated_text", "").strip()
-    return str(data)
+    return data["choices"][0]["message"]["content"].strip()
+
+
+def extract_json(raw: str):
+    """Robustly extract a JSON array or object from a model response."""
+    # Strip markdown code fences
+    raw = raw.replace("```json", "").replace("```", "").strip()
+    # Try direct parse first
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+    # Try to find the outermost [...] or {...}
+    for start_char, end_char in [("[", "]"), ("{", "}")]:
+        start = raw.find(start_char)
+        end   = raw.rfind(end_char)
+        if start != -1 and end != -1 and end > start:
+            try:
+                return json.loads(raw[start:end + 1])
+            except json.JSONDecodeError:
+                pass
+    raise ValueError(f"No valid JSON found in response:\n\n{raw}")
 
 # ── Prompts ───────────────────────────────────────────────────────────────────
-PURCHASE_PROMPT = """<s>[INST]
-You are an expert climate and sustainability analyst. A user listed their recent purchases.
-Analyze each item, estimate its carbon footprint (kg CO2e), and suggest a lower-carbon alternative.
+PURCHASE_SYSTEM = (
+    "You are an expert climate and sustainability analyst. "
+    "Always respond with ONLY a valid JSON array — no markdown fences, no explanation, no preamble. "
+    "Each element must have exactly these keys: "
+    "item (string), co2_kg (number), impact_level (high|medium|low), "
+    "reason (string, 1 sentence), alternative (string), alt_co2_kg (number), saving_pct (integer 0-100)."
+)
 
-Purchases:
-{purchases}
+def purchase_user_msg(purchases: str) -> str:
+    return (
+        f"Analyse each of these purchases, estimate its carbon footprint in kg CO2e, "
+        f"and suggest a specific lower-carbon alternative.\n\nPurchases:\n{purchases}"
+    )
 
-Respond ONLY with a valid JSON array. Each element:
-{{
-  "item": "<purchase name>",
-  "co2_kg": <number>,
-  "impact_level": "high|medium|low",
-  "reason": "<1 sentence why>",
-  "alternative": "<specific product/brand or habit>",
-  "alt_co2_kg": <number>,
-  "saving_pct": <integer 0-100>
-}}
-No markdown, no explanation, only the JSON array.
-[/INST]"""
+ENERGY_SYSTEM = (
+    "You are an energy efficiency consultant for small businesses. "
+    "Always respond with ONLY a valid JSON array — no markdown fences, no explanation, no preamble. "
+    "Each element must have exactly these keys: "
+    "title (string), description (string, 2-3 sentences), "
+    "estimated_saving_pct (integer), payback_months (integer or null), "
+    "difficulty (easy|medium|hard), co2_impact (high|medium|low)."
+)
 
-ENERGY_PROMPT = """<s>[INST]
-You are an energy efficiency consultant for small businesses.
-A business provided details about their energy usage.
-
-Business info:
-{biz_info}
-
-Give 5 specific, actionable recommendations to reduce energy costs and carbon footprint.
-Respond ONLY as a valid JSON array. Each element:
-{{
-  "title": "<short action title>",
-  "description": "<2-3 sentence explanation>",
-  "estimated_saving_pct": <integer>,
-  "payback_months": <integer or null>,
-  "difficulty": "easy|medium|hard",
-  "co2_impact": "high|medium|low"
-}}
-No markdown, no explanation, only the JSON array.
-[/INST]"""
+def energy_user_msg(biz_info: str) -> str:
+    return (
+        f"Give exactly 5 specific, actionable recommendations to reduce energy costs "
+        f"and carbon footprint for this business.\n\nBusiness info:\n{biz_info}"
+    )
 
 # ── Header ────────────────────────────────────────────────────────────────────
 st.markdown("""
@@ -209,15 +228,16 @@ with tab1:
         elif not purchases_input.strip():
             st.warning("Please enter at least one purchase.")
         else:
-            with st.spinner("Analysing your carbon footprint with Mistral-7B..."):
-                prompt = PURCHASE_PROMPT.format(purchases=purchases_input.strip())
-                raw = call_hf(prompt, hf_token)
-
             try:
-                # Extract JSON from response
-                start = raw.find("[")
-                end = raw.rfind("]") + 1
-                results = json.loads(raw[start:end])
+                with st.spinner("Analysing your carbon footprint with Mistral-7B-Instruct-v0.3..."):
+                    raw = call_hf(
+                        PURCHASE_SYSTEM,
+                        purchase_user_msg(purchases_input.strip()),
+                        hf_token,
+                    )
+                results = extract_json(raw)
+                if not isinstance(results, list):
+                    results = [results]
 
                 total_co2 = sum(r.get("co2_kg", 0) for r in results)
                 total_alt = sum(r.get("alt_co2_kg", 0) for r in results)
@@ -245,9 +265,11 @@ with tab1:
                     </div>
                     """, unsafe_allow_html=True)
 
-            except Exception as e:
-                st.error(f"Could not parse AI response. Raw output:\n\n{raw}")
-                st.exception(e)
+            except RuntimeError as e:
+                st.error(f"API Error: {e}")
+            except (ValueError, KeyError) as e:
+                st.error(f"Could not parse AI response: {e}")
+                st.code(raw if 'raw' in locals() else "No response received")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # TAB 2 — Business Energy Advisor
@@ -294,14 +316,16 @@ with tab2:
                 f"Lighting: {lighting}\n"
                 f"Extra context: {extra_info or 'None provided'}"
             )
-            with st.spinner("Building your personalised energy plan with Mistral-7B..."):
-                prompt = ENERGY_PROMPT.format(biz_info=biz_info)
-                raw = call_hf(prompt, hf_token)
-
             try:
-                start = raw.find("[")
-                end = raw.rfind("]") + 1
-                tips = json.loads(raw[start:end])
+                with st.spinner("Building your personalised energy plan with Mistral-7B-Instruct-v0.3..."):
+                    raw = call_hf(
+                        ENERGY_SYSTEM,
+                        energy_user_msg(biz_info),
+                        hf_token,
+                    )
+                tips = extract_json(raw)
+                if not isinstance(tips, list):
+                    tips = [tips]
 
                 st.markdown("---")
                 st.markdown(f"### ⚡ Your Energy Action Plan — {biz_type}")
@@ -332,9 +356,11 @@ with tab2:
                         if payback:
                             st.caption(f"Payback: {payback} months")
 
-            except Exception as e:
-                st.error(f"Could not parse AI response. Raw output:\n\n{raw}")
-                st.exception(e)
+            except RuntimeError as e:
+                st.error(f"API Error: {e}")
+            except (ValueError, KeyError) as e:
+                st.error(f"Could not parse AI response: {e}")
+                st.code(raw if 'raw' in locals() else "No response received")
 
 # ── Footer ────────────────────────────────────────────────────────────────────
 st.markdown("---")

@@ -99,22 +99,35 @@ h1, h2, h3 { font-family: 'DM Serif Display', serif; }
 HF_API_URL = "https://api-inference.huggingface.co/v1/chat/completions"
 HF_MODEL   = "mistralai/Mistral-7B-Instruct-v0.3"
 
+def sanitize(text: str) -> str:
+    """Replace non-ASCII symbols so the request body is clean ASCII/UTF-8."""
+    replacements = {
+        "£": "GBP", "€": "EUR", "₂": "2",
+        "°": " degrees", "—": "-", "–": "-",
+        "’": "'", "“": '"', "”": '"',
+    }
+    for ch, rep in replacements.items():
+        text = text.replace(ch, rep)
+    return text.encode("ascii", errors="ignore").decode("ascii")
+
+
 def call_hf(system_msg: str, user_msg: str, hf_token: str) -> str:
     """Call HF Inference API using the OpenAI-compatible chat endpoint."""
     headers = {
         "Authorization": f"Bearer {hf_token}",
-        "Content-Type": "application/json",
+        "Content-Type": "application/json; charset=utf-8",
     }
     payload = {
         "model": HF_MODEL,
         "messages": [
-            {"role": "system", "content": system_msg},
-            {"role": "user",   "content": user_msg},
+            {"role": "system", "content": sanitize(system_msg)},
+            {"role": "user",   "content": sanitize(user_msg)},
         ],
         "max_tokens": 1200,
         "temperature": 0.2,
     }
-    resp = requests.post(HF_API_URL, headers=headers, json=payload, timeout=90)
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    resp = requests.post(HF_API_URL, headers=headers, data=body, timeout=90)
     if resp.status_code != 200:
         raise RuntimeError(f"HF API error {resp.status_code}: {resp.text[:400]}")
     data = resp.json()

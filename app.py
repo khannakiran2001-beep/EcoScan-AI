@@ -95,9 +95,10 @@ h1, h2, h3 { font-family: 'DM Serif Display', serif; }
 """, unsafe_allow_html=True)
 
 # ── HF Inference helper ───────────────────────────────────────────────────────
-# Using the newer /v1/chat/completions endpoint (OpenAI-compatible)
-HF_API_URL = "https://api-inference.huggingface.co/v1/chat/completions"
-HF_MODEL   = "mistralai/Mistral-7B-Instruct-v0.3"
+# HF Inference Providers router (current as of 2025)
+# https://huggingface.co/docs/inference-providers/en/index
+HF_API_URL = "https://router.huggingface.co/v1/chat/completions"
+HF_MODEL   = "meta-llama/Llama-3.1-8B-Instruct"   # free, fast, reliable on router
 
 def sanitize(text: str) -> str:
     """Replace non-ASCII symbols so the request body is clean ASCII/UTF-8."""
